@@ -1,0 +1,213 @@
+---
+title: "Reproducibility Twitter data analysis"
+author: "Matt Jaquiery"
+date: "17/02/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_current$set(echo = F)
+
+library(tidyverse)
+library(lubridate)
+library(tm)
+library(SentimentAnalysis)
+library(quanteda)
+library(EGAnet)
+
+```
+
+```{r load data}
+
+d <- read.csv('data/2022-02-17_Twitter_ReproData.csv')
+d
+
+```
+
+```{r simple exploration}
+
+# https://data.library.virginia.edu/an-introduction-to-analyzing-twitter-data-with-r/
+
+d <- d %>%
+  filter(!is_retweet) %>%
+  mutate(
+    created = dmy_hm(created_at),
+    day = day(created),
+    hour = hour(created)
+  )
+
+ggplot(d, aes(day)) +
+  geom_density() + 
+  scale_x_continuous(limits = c(1, 31)) +
+  coord_polar()
+
+ggplot(d, aes(hour)) +
+  geom_density() + 
+  scale_x_continuous(limits = c(0, 23)) +
+  coord_polar()
+
+```
+
+```{r text exploration}
+
+d <- d %>%
+  mutate(
+    clean_text = str_replace_all(text, "@[0-9A-Za-z]+", ""),
+    clean_text = str_replace_all(text, "<U\\+[0-9A-F]{8}>", ""),
+    clean_text = str_to_lower(clean_text)
+  )
+
+text_corpus <- Corpus(VectorSource(d$clean_text))
+# Remove common words
+text_corpus <- tm_map(text_corpus, removeWords, stopwords("english"))
+text_corpus <- tm_map(text_corpus, removePunctuation)
+
+text_tibble <- tibble(text_clean = get("content", text_corpus))
+
+text_tibble
+```
+
+```{r sentiment}
+
+text_sentiment <- analyzeSentiment(text_tibble$text_clean)
+text_sentiment %>% 
+  convertToDirection() %>%
+  select(WordCount, starts_with('Sentiment')) 
+
+text_sentiment <- text_sentiment %>%
+  rowid_to_column() %>%
+  group_by(rowid) %>% 
+  mutate(
+    Sentiment = mean(c_across(starts_with('Sentiment'))),
+    Negativity = mean(c_across(starts_with('Negativity'))),
+    Positivity = mean(c_across(starts_with('Positivity'))),
+  ) %>%
+  select(rowid, WordCount, Sentiment, Negativity, Positivity, everything())
+
+d_all <- bind_cols(d, text_sentiment)
+
+```
+
+
+```{r word frequencies}
+
+tokenized_list = d_all %>%
+  .$clean_text %>%
+  tokens() %>%
+  dfm() %>%
+  convert(to = 'data.frame') %>%
+  select(-starts_with('~')) %>%
+  as_tibble() %>%
+  summarise(
+    across(where(is.numeric), sum)
+  ) %>% 
+  pivot_longer(everything(), names_to = "word", values_to = "count") %>%
+  arrange(desc(count))
+
+negative_tokenized_list <- d_all %>%
+  filter(Negativity > 0) %>%
+  .$clean_text %>%
+  tokens() %>%
+  dfm() %>%
+  convert(to = 'data.frame') %>%
+  select(-starts_with('~')) %>%
+  as_tibble() %>%
+  summarise(
+    across(where(is.numeric), sum)
+  ) %>% 
+  pivot_longer(everything(), names_to = "word", values_to = "count") %>%
+  arrange(desc(count))
+
+positive_tokenized_list <- d_all %>%
+  filter(Positivity > 0) %>%
+  .$clean_text %>%
+  tokens() %>%
+  dfm() %>%
+  convert(to = 'data.frame') %>%
+  select(-starts_with('~')) %>%
+  as_tibble() %>%
+  summarise(
+    across(where(is.numeric), sum)
+  ) %>% 
+  pivot_longer(everything(), names_to = "word", values_to = "count") %>%
+  arrange(desc(count))
+
+counts <- tokenized_list %>%
+  left_join(
+    rename(negative_tokenized_list, count_negative = count),
+    by = 'word'
+  ) %>%
+  left_join(
+    rename(positive_tokenized_list, count_positive = count),
+    by = 'word'
+  ) %>%
+  arrange(desc(count))
+
+```
+
+```{r cluster analysis}
+.EGA <- function(x, ...) {
+  EGA(
+    x, 
+    plot.args = list(
+      vsize = 3,
+      label.size = 2
+    ),
+    ...
+  )
+}
+
+cluster_corpus = d_all %>%
+  .$clean_text %>%
+  VectorSource() %>%
+  Corpus() %>%
+  DocumentTermMatrix() %>%
+  removeSparseTerms(.99) %>%
+  as.matrix() %>%
+  as_tibble()
+
+ega <- .EGA(cluster_corpus, corr = "spearman")
+ega
+ggsave(
+  'img/EGA_all.png', 
+  height = 10, width = 20, units = 'cm', 
+  dpi = 600, limitsize = F
+)
+
+cluster_corpus_negative = d_all %>%
+  filter(Negativity > 0) %>%
+  .$clean_text %>%
+  VectorSource() %>%
+  Corpus() %>%
+  DocumentTermMatrix() %>%
+  removeSparseTerms(.99) %>%
+  as.matrix() %>%
+  as_tibble()
+
+ega_negative <- .EGA(cluster_corpus_negative, corr = "spearman")
+ega_negative
+ggsave(
+  'img/EGA_negative.png', 
+  height = 10, width = 20, units = 'cm', 
+  dpi = 600, limitsize = F
+)
+
+cluster_corpus_positive = d_all %>%
+  filter(Positivity > 0) %>%
+  .$clean_text %>%
+  VectorSource() %>%
+  Corpus() %>%
+  DocumentTermMatrix() %>%
+  removeSparseTerms(.99) %>%
+  as.matrix() %>%
+  as_tibble()
+
+ega_positive <- .EGA(cluster_corpus_positive, corr = "spearman")
+ega_positive
+ggsave(
+  'img/EGA_positive.png', 
+  height = 10, width = 20, units = 'cm', 
+  dpi = 600, limitsize = F
+)
+
+```
